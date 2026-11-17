@@ -4,7 +4,17 @@
   "compatibilityLevel": "JAVA_21",
   "mixins": [
     "ServerLevelRulesMixin",
-    "ServerPlayerRespawnMixin"
+    "ServerPlayerRespawnMixin",
+    "LevelAccessorDifficultyMixin",
+    "ServerLevelWeatherMixin",
+    "ServerLevelWeatherSyncMixin",
+    "WeatherCommandMixin",
+    "ServerLevelRecipeMixin",
+    "CraftingMenuMixin",
+    "LevelClockTimeMixin",
+    "EnvironmentAttributeClockMixin",
+    "PlayerListTimeMixin",
+    "ServerPlayerTeleportMixin"
   ],
   "injectors": {
     "defaultRequire": 1

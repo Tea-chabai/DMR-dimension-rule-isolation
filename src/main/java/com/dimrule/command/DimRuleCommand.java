@@ -2,7 +2,9 @@ package com.dimrule.command;
 
 import com.dimrule.DimensionRuleIsolation;
 import com.dimrule.DimensionRules;
+import com.dimrule.TimeIsolation;
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
@@ -82,6 +84,73 @@ public final class DimRuleCommand {
                 .then(remove)
                 .then(delete);
 
+        var difficultyValue = Commands.argument("value", StringArgumentType.word())
+                .suggests((context, builder) -> SharedSuggestionProvider.suggest(
+                        java.util.List.of("peaceful", "easy", "normal", "hard"), builder))
+                .executes(context -> difficulty(context, true));
+        var difficultyNode = Commands.literal("difficulty")
+                .requires(Commands.hasPermission(Commands.LEVEL_ADMINS))
+                .then(Commands.argument("dimension", IdentifierArgument.id())
+                        .suggests(SUGGEST_DIMENSIONS)
+                        .executes(context -> difficulty(context, false))
+                        .then(difficultyValue));
+
+        var weatherAction = Commands.literal("weather")
+                .requires(Commands.hasPermission(Commands.LEVEL_ADMINS))
+                .then(Commands.argument("dimension", IdentifierArgument.id())
+                        .suggests(SUGGEST_DIMENSIONS)
+                        .executes(context -> weather(context, false, -1))
+                        .then(Commands.argument("action", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(
+                                        java.util.List.of("clear", "rain", "thunder"), builder))
+                                .executes(context -> weather(context, true, -1))
+                                .then(Commands.argument("duration",
+                                                com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
+                                        .executes(context -> weather(context, true,
+                                                com.mojang.brigadier.arguments.IntegerArgumentType
+                                                        .getInteger(context, "duration"))))));
+
+        var recipeNode = Commands.literal("recipe")
+                .requires(Commands.hasPermission(Commands.LEVEL_ADMINS))
+                .then(Commands.literal("list")
+                        .then(Commands.argument("dimension", IdentifierArgument.id())
+                                .suggests(SUGGEST_DIMENSIONS)
+                                .executes(context -> recipeList(context))))
+                .then(Commands.literal("add")
+                        .then(Commands.argument("dimension", IdentifierArgument.id())
+                                .suggests(SUGGEST_DIMENSIONS)
+                                .then(Commands.argument("namespace", StringArgumentType.word())
+                                        .executes(context -> recipeEdit(context, true)))))
+                .then(Commands.literal("remove")
+                        .then(Commands.argument("dimension", IdentifierArgument.id())
+                                .suggests(SUGGEST_DIMENSIONS)
+                                .then(Commands.argument("namespace", StringArgumentType.word())
+                                        .executes(context -> recipeEdit(context, false)))))
+                .then(Commands.literal("rebuild")
+                        .executes(context -> {
+                            com.dimrule.RecipeIsolation.rebuild(context.getSource().getServer());
+                            context.getSource().sendSuccess(() -> Component.literal("已重建各维度的配方视图"), true);
+                            return 1;
+                        }))
+                .then(Commands.literal("check")
+                        .then(Commands.argument("dimension", IdentifierArgument.id())
+                                .suggests(SUGGEST_DIMENSIONS)
+                                .then(Commands.argument("id", IdentifierArgument.id())
+                                        .executes(context -> recipeCheck(context)))));
+
+        var timeNode = Commands.literal("time")
+                .requires(Commands.hasPermission(Commands.LEVEL_ADMINS))
+                .then(Commands.argument("dimension", IdentifierArgument.id())
+                        .suggests(SUGGEST_DIMENSIONS)
+                        .then(Commands.literal("query").executes(context -> timeQuery(context)))
+                        .then(Commands.literal("set")
+                                .then(Commands.argument("value", StringArgumentType.word())
+                                        .executes(context -> timeSet(context))))
+                        .then(Commands.literal("add")
+                                .then(Commands.argument("ticks", IntegerArgumentType.integer())
+                                        .executes(context -> timeAdd(context))))
+                        .then(Commands.literal("reset").executes(context -> timeReset(context))));
+
         var valueNode = Commands.argument("value", StringArgumentType.word())
                 .executes(context -> query(context, true));
         var ruleNode = Commands.argument("rule", StringArgumentType.word())
@@ -100,6 +169,10 @@ public final class DimRuleCommand {
                         .requires(Commands.hasPermission(Commands.LEVEL_ADMINS))
                         .executes(context -> reload(context.getSource())))
                 .then(groupNode)
+                .then(difficultyNode)
+                .then(weatherAction)
+                .then(recipeNode)
+                .then(timeNode)
                 .then(dimensionNode));
     }
 
@@ -215,7 +288,233 @@ public final class DimRuleCommand {
 
     private static int reload(CommandSourceStack source) {
         DimensionRules.bootstrap(source.getServer(), DimensionRuleIsolation.configPath(source.getServer()));
-        source.sendSuccess(() -> Component.literal("已从磁盘重新加载规则与分组"), true);
+        source.sendSuccess(() -> Component.literal("已从磁盘重新加载规则、分组与难度"), true);
+        return 1;
+    }
+
+    private static int difficulty(CommandContext<CommandSourceStack> context, boolean set)
+            throws CommandSyntaxException {
+        CommandSourceStack source = context.getSource();
+        ServerLevel level = resolve(source, IdentifierArgument.getId(context, "dimension").toString());
+        if (level == null) {
+            throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                    .createWithContext(new com.mojang.brigadier.StringReader("dimension"));
+        }
+        var key = level.dimension();
+        if (!set) {
+            var stored = DimensionRules.getDifficulty(key);
+            String shown = stored != null ? stored.getSerializedName()
+                    : level.getDifficulty().getSerializedName();
+            String suffix = stored != null ? "" : " (vanilla default)";
+            source.sendSuccess(() -> Component.literal(
+                    key.identifier() + ".difficulty = " + shown + suffix), false);
+            return 1;
+        }
+        String raw = StringArgumentType.getString(context, "value");
+        net.minecraft.world.Difficulty difficulty;
+        try {
+            difficulty = net.minecraft.world.Difficulty.valueOf(raw.toUpperCase(java.util.Locale.ROOT));
+        } catch (RuntimeException e) {
+            throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                    .createWithContext(new com.mojang.brigadier.StringReader(raw));
+        }
+        DimensionRules.setDifficulty(key, difficulty);
+        DimensionRules.save();
+        source.sendSuccess(() -> Component.literal(
+                key.identifier() + ".difficulty = " + difficulty.getSerializedName()), true);
+        return 1;
+    }
+
+    private static int timeQuery(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        ServerLevel level = resolve(context.getSource(),
+                IdentifierArgument.getId(context, "dimension").toString());
+        if (level == null) {
+            throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                    .createWithContext(new com.mojang.brigadier.StringReader("dimension"));
+        }
+        long offset = TimeIsolation.offset(level.dimension());
+        long day = Math.floorMod(TimeIsolation.baseTicks(level) + offset, 24000L);
+        context.getSource().sendSuccess(() -> Component.literal(
+                level.dimension().identifier() + ".time offset=" + offset + " dayTime=" + day), false);
+        return 1;
+    }
+
+    private static int timeSet(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        ServerLevel level = resolve(context.getSource(),
+                IdentifierArgument.getId(context, "dimension").toString());
+        if (level == null) {
+            throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                    .createWithContext(new com.mojang.brigadier.StringReader("dimension"));
+        }
+        String raw = StringArgumentType.getString(context, "value").toLowerCase(java.util.Locale.ROOT);
+        long target = switch (raw) {
+            case "day" -> 1000L;
+            case "noon" -> 6000L;
+            case "night" -> 13000L;
+            case "midnight" -> 18000L;
+            default -> {
+                try {
+                    long parsed = Long.parseLong(raw);
+                    yield Math.floorMod(parsed, 24000L);
+                } catch (NumberFormatException e) {
+                    throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                            .createWithContext(new com.mojang.brigadier.StringReader(raw));
+                }
+            }
+        };
+        long current = Math.floorMod(TimeIsolation.baseTicks(level), 24000L);
+        long offset = Math.floorMod(target - current, 24000L);
+        TimeIsolation.setOffset(level.dimension(), offset);
+        DimensionRules.save();
+        for (var player : level.players()) {
+            TimeIsolation.sendTime(player, level);
+        }
+        context.getSource().sendSuccess(() -> Component.literal(
+                level.dimension().identifier() + ".time set to " + target + " (offset=" + offset + ")"), true);
+        return 1;
+    }
+
+    private static int timeAdd(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        ServerLevel level = resolve(context.getSource(),
+                IdentifierArgument.getId(context, "dimension").toString());
+        if (level == null) {
+            throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                    .createWithContext(new com.mojang.brigadier.StringReader("dimension"));
+        }
+        int ticks = IntegerArgumentType.getInteger(context, "ticks");
+        long offset = TimeIsolation.offset(level.dimension()) + ticks;
+        TimeIsolation.setOffset(level.dimension(), offset);
+        DimensionRules.save();
+        for (var player : level.players()) {
+            TimeIsolation.sendTime(player, level);
+        }
+        context.getSource().sendSuccess(() -> Component.literal(
+                level.dimension().identifier() + ".time offset " + (ticks >= 0 ? "+=" : "-=") + Math.abs(ticks)), true);
+        return 1;
+    }
+
+    private static int timeReset(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        ServerLevel level = resolve(context.getSource(),
+                IdentifierArgument.getId(context, "dimension").toString());
+        if (level == null) {
+            throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                    .createWithContext(new com.mojang.brigadier.StringReader("dimension"));
+        }
+        TimeIsolation.setOffset(level.dimension(), 0L);
+        DimensionRules.save();
+        for (var player : level.players()) {
+            TimeIsolation.sendTime(player, level);
+        }
+        context.getSource().sendSuccess(() -> Component.literal(
+                level.dimension().identifier() + ".time reset to global"), true);
+        return 1;
+    }
+
+    private static int recipeList(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        ServerLevel level = resolve(context.getSource(),
+                IdentifierArgument.getId(context, "dimension").toString());
+        if (level == null) {
+            throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                    .createWithContext(new com.mojang.brigadier.StringReader("dimension"));
+        }
+        var namespaces = DimensionRules.recipeNamespaces().get(level.dimension());
+        String text = namespaces == null || namespaces.isEmpty()
+                ? "无（使用全服配方）" : String.join(", ", namespaces);
+        context.getSource().sendSuccess(() -> Component.literal(
+                level.dimension().identifier() + ".recipes: " + text), false);
+        return 1;
+    }
+
+    private static int recipeEdit(CommandContext<CommandSourceStack> context, boolean add)
+            throws CommandSyntaxException {
+        CommandSourceStack source = context.getSource();
+        ServerLevel level = resolve(source, IdentifierArgument.getId(context, "dimension").toString());
+        if (level == null) {
+            throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                    .createWithContext(new com.mojang.brigadier.StringReader("dimension"));
+        }
+        String namespace = StringArgumentType.getString(context, "namespace");
+        java.util.Set<String> namespaces = new java.util.HashSet<>(
+                DimensionRules.recipeNamespaces().getOrDefault(level.dimension(), java.util.Set.of()));
+        if (add) {
+            namespaces.add(namespace);
+        } else {
+            namespaces.remove(namespace);
+        }
+        DimensionRules.setRecipeNamespaces(level.dimension(), namespaces);
+        DimensionRules.save();
+        try {
+            com.dimrule.RecipeIsolation.rebuild(source.getServer());
+        } catch (Throwable t) {
+            source.sendFailure(Component.literal("rebuild failed: " + t));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal(
+                level.dimension().identifier() + ".recipes " + (add ? "+= " : "-= ") + namespace), true);
+        return 1;
+    }
+
+    private static int recipeCheck(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        ServerLevel level = resolve(context.getSource(),
+                IdentifierArgument.getId(context, "dimension").toString());
+        if (level == null) {
+            throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                    .createWithContext(new com.mojang.brigadier.StringReader("dimension"));
+        }
+        String id = IdentifierArgument.getId(context, "id").toString();
+        ResourceKey<net.minecraft.world.item.crafting.Recipe<?>> key;
+        try {
+            key = ResourceKey.create(Registries.RECIPE, Identifier.parse(id));
+        } catch (RuntimeException e) {
+            throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                    .createWithContext(new com.mojang.brigadier.StringReader(id));
+        }
+        boolean present = com.dimrule.RecipeIsolation.has(level, key);
+        context.getSource().sendSuccess(() -> Component.literal(
+                level.dimension().identifier() + " sees " + id + ": " + present), false);
+        return present ? 1 : 0;
+    }
+
+    private static int weather(CommandContext<CommandSourceStack> context, boolean set, int duration)
+            throws CommandSyntaxException {
+        CommandSourceStack source = context.getSource();
+        ServerLevel level = resolve(source, IdentifierArgument.getId(context, "dimension").toString());
+        if (level == null) {
+            throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                    .createWithContext(new com.mojang.brigadier.StringReader("dimension"));
+        }
+        var key = level.dimension();
+        if (!set) {
+            var data = DimensionRules.getWeather(key);
+            String text = data == null ? "无（使用全服天气）"
+                    : "raining=" + data.isRaining() + ", thundering=" + data.isThundering()
+                    + ", clear=" + data.getClearWeatherTime() + ", rain=" + data.getRainTime()
+                    + ", thunder=" + data.getThunderTime();
+            source.sendSuccess(() -> Component.literal(key.identifier() + ".weather: " + text), false);
+            return 1;
+        }
+        String action = StringArgumentType.getString(context, "action");
+        int clear = 0;
+        int rain = 0;
+        boolean raining = false;
+        boolean thundering = false;
+        switch (action) {
+            case "clear" -> clear = duration >= 0 ? duration : ServerLevel.RAIN_DELAY.sample(level.getRandom());
+            case "rain" -> {
+                rain = duration >= 0 ? duration : ServerLevel.RAIN_DURATION.sample(level.getRandom());
+                raining = true;
+            }
+            case "thunder" -> {
+                rain = duration >= 0 ? duration : ServerLevel.THUNDER_DURATION.sample(level.getRandom());
+                raining = true;
+                thundering = true;
+            }
+            default -> throw CommandSyntaxException.BUILT_IN_EXCEPTIONS.dispatcherUnknownArgument()
+                    .createWithContext(new com.mojang.brigadier.StringReader(action));
+        }
+        DimensionRules.setWeather(level, clear, rain, raining, thundering);
+        DimensionRules.save();
+        source.sendSuccess(() -> Component.literal(key.identifier() + ".weather = " + action), true);
         return 1;
     }
 

@@ -32,10 +32,20 @@ public final class DimensionRuleIsolation implements ModInitializer {
                 DimRuleCommand.register(dispatcher)
         );
 
+        ServerLifecycleEvents.SERVER_STARTING.register(server ->
+                DimensionRules.preload(configPath(server)));
+
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
             DimensionRules.bootstrap(server, configPath(server));
+            RecipeIsolation.rebuild(server);
             LOG.info("Dimensional Rule Isolation ready: {} dimension(s) with independent rules",
                     DimensionRules.count());
+        });
+
+        ServerLifecycleEvents.END_DATA_PACK_RELOAD.register((server, resourceManager, success) -> {
+            if (success) {
+                RecipeIsolation.rebuild(server);
+            }
         });
 
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {

@@ -47,6 +47,11 @@ public final class DimensionRules {
     private static final Map<String, Group> GROUPS = new ConcurrentHashMap<>();
     private static final Map<ResourceKey<Level>, String> MEMBER_OF = new ConcurrentHashMap<>();
     private static final Map<ResourceKey<Level>, GameRules> OWN = new ConcurrentHashMap<>();
+    private static final Map<ResourceKey<Level>, net.minecraft.world.Difficulty> DIFFICULTY = new ConcurrentHashMap<>();
+    private static final Map<ResourceKey<Level>, net.minecraft.world.level.saveddata.WeatherData> WEATHER =
+            new ConcurrentHashMap<>();
+    private static final Map<ResourceKey<Level>, java.util.Set<String>> RECIPE_NAMESPACES = new ConcurrentHashMap<>();
+    private static final Map<ResourceKey<Level>, Long> TIME = new ConcurrentHashMap<>();
     private static Path configFile;
 
     private DimensionRules() {
@@ -75,11 +80,56 @@ public final class DimensionRules {
         }
     }
 
+    /**
+     * Reads the parts of the config that must be known <b>before</b> any level exists, so the
+     * difficulty redirect already answers with the per-dimension value while chunks load.
+     * Rules and weather still need a live level list and are handled by {@link #bootstrap}.
+     */
+    public static void preload(Path file) {
+        DIFFICULTY.clear();
+        RECIPE_NAMESPACES.clear();
+        JsonObject stored = asObject(read(file));
+        if (stored.has("difficulty") && stored.get("difficulty").isJsonObject()) {
+            for (Map.Entry<String, JsonElement> entry : stored.getAsJsonObject("difficulty").entrySet()) {
+                ResourceKey<Level> key = parse(entry.getKey());
+                if (key == null) {
+                    continue;
+                }
+                try {
+                    DIFFICULTY.put(key, net.minecraft.world.Difficulty.valueOf(
+                            entry.getValue().getAsString().toUpperCase(java.util.Locale.ROOT)));
+                } catch (RuntimeException ignored) {
+                    // unknown value: keep vanilla behaviour for that dimension
+                }
+            }
+        }
+        if (stored.has("recipes") && stored.get("recipes").isJsonObject()) {
+            for (Map.Entry<String, JsonElement> entry : stored.getAsJsonObject("recipes").entrySet()) {
+                ResourceKey<Level> key = parse(entry.getKey());
+                if (key == null || !entry.getValue().isJsonArray()) {
+                    continue;
+                }
+                java.util.Set<String> namespaces = ConcurrentHashMap.newKeySet();
+                entry.getValue().getAsJsonArray().forEach(value -> namespaces.add(value.getAsString()));
+                if (!namespaces.isEmpty()) {
+                    RECIPE_NAMESPACES.put(key, namespaces);
+                }
+            }
+        }
+        DimensionRuleIsolation.LOG.info("Preloaded difficulty for {} dimension(s) before level creation",
+                DIFFICULTY.size());
+    }
+
     public static void bootstrap(MinecraftServer server, Path file) {
         configFile = file;
         GROUPS.clear();
         MEMBER_OF.clear();
         OWN.clear();
+        DIFFICULTY.clear();
+        WEATHER.clear();
+        RECIPE_NAMESPACES.clear();
+        TIME.clear();
+        com.dimrule.TimeIsolation.clear();
         JsonObject stored = asObject(read(file));
 
         JsonObject dimensions = stored.has("dimensions") && stored.get("dimensions").isJsonObject()
@@ -148,12 +198,76 @@ public final class DimensionRules {
             }
         }
 
+        if (stored.has("difficulty") && stored.get("difficulty").isJsonObject()) {
+            for (Map.Entry<String, JsonElement> entry : stored.getAsJsonObject("difficulty").entrySet()) {
+                ResourceKey<Level> key = parse(entry.getKey());
+                if (key == null) {
+                    continue;
+                }
+                try {
+                    DIFFICULTY.put(key, net.minecraft.world.Difficulty.valueOf(
+                            entry.getValue().getAsString().toUpperCase(java.util.Locale.ROOT)));
+                } catch (RuntimeException ignored) {
+                    // unknown value: keep vanilla behaviour for that dimension
+                }
+            }
+        }
+
         for (ServerLevel level : server.getAllLevels()) {
             if (!MEMBER_OF.containsKey(level.dimension())) {
                 OWN.computeIfAbsent(level.dimension(),
                         key -> new GameRules(server.getWorldData().enabledFeatures()));
             }
+            net.minecraft.world.level.saveddata.WeatherData global = server.getWeatherData();
+            WEATHER.put(level.dimension(), new net.minecraft.world.level.saveddata.WeatherData(
+                    global.getClearWeatherTime(), global.getRainTime(), global.getThunderTime(),
+                    global.isRaining(), global.isThundering()));
         }
+
+        if (stored.has("weather") && stored.get("weather").isJsonObject()) {
+            for (Map.Entry<String, JsonElement> entry : stored.getAsJsonObject("weather").entrySet()) {
+                ResourceKey<Level> key = parse(entry.getKey());
+                if (key == null || !entry.getValue().isJsonObject()) {
+                    continue;
+                }
+                JsonObject w = entry.getValue().getAsJsonObject();
+                WEATHER.put(key, new net.minecraft.world.level.saveddata.WeatherData(
+                        w.get("clear").getAsInt(), w.get("rain").getAsInt(),
+                        w.get("thunder").getAsInt(), w.get("raining").getAsBoolean(),
+                        w.get("thundering").getAsBoolean()));
+            }
+        }
+
+        if (stored.has("recipes") && stored.get("recipes").isJsonObject()) {
+            for (Map.Entry<String, JsonElement> entry : stored.getAsJsonObject("recipes").entrySet()) {
+                ResourceKey<Level> key = parse(entry.getKey());
+                if (key == null || !entry.getValue().isJsonArray()) {
+                    continue;
+                }
+                java.util.Set<String> namespaces = ConcurrentHashMap.newKeySet();
+                entry.getValue().getAsJsonArray().forEach(value -> namespaces.add(value.getAsString()));
+                if (!namespaces.isEmpty()) {
+                    RECIPE_NAMESPACES.put(key, namespaces);
+                }
+            }
+        }
+
+        if (stored.has("time") && stored.get("time").isJsonObject()) {
+            for (Map.Entry<String, JsonElement> entry : stored.getAsJsonObject("time").entrySet()) {
+                ResourceKey<Level> key = parse(entry.getKey());
+                if (key == null) {
+                    continue;
+                }
+                try {
+                    long ticks = entry.getValue().getAsLong();
+                    TIME.put(key, ticks);
+                    com.dimrule.TimeIsolation.setOffset(key, ticks);
+                } catch (RuntimeException ignored) {
+                    // malformed entry: keep vanilla time for that dimension
+                }
+            }
+        }
+
         DimensionRuleIsolation.LOG.info("Initialised {} dimension(s), {} group(s) from {}",
                 count(), GROUPS.size(), file);
     }
@@ -175,6 +289,48 @@ public final class DimensionRules {
             total += group.members.size();
         }
         return total;
+    }
+
+    public static net.minecraft.world.Difficulty getDifficulty(ResourceKey<Level> key) {
+        return DIFFICULTY.get(key);
+    }
+
+    public static void setDifficulty(ResourceKey<Level> key, net.minecraft.world.Difficulty difficulty) {
+        DIFFICULTY.put(key, difficulty);
+    }
+
+    public static net.minecraft.world.level.saveddata.WeatherData getWeather(ResourceKey<Level> key) {
+        return WEATHER.get(key);
+    }
+
+    public static net.minecraft.world.level.saveddata.WeatherData getWeather(ServerLevel level) {
+        return WEATHER.get(level.dimension());
+    }
+
+    public static void setWeather(ServerLevel level, int clearTime, int rainTime,
+                                  boolean raining, boolean thundering) {
+        net.minecraft.world.level.saveddata.WeatherData data =
+                WEATHER.computeIfAbsent(level.dimension(),
+                        key -> new net.minecraft.world.level.saveddata.WeatherData());
+        data.setClearWeatherTime(clearTime);
+        data.setRainTime(rainTime);
+        data.setThunderTime(rainTime);
+        data.setRaining(raining);
+        data.setThundering(thundering);
+    }
+
+    public static Map<ResourceKey<Level>, java.util.Set<String>> recipeNamespaces() {
+        return java.util.Collections.unmodifiableMap(RECIPE_NAMESPACES);
+    }
+
+    public static void setRecipeNamespaces(ResourceKey<Level> key, java.util.Set<String> namespaces) {
+        if (namespaces.isEmpty()) {
+            RECIPE_NAMESPACES.remove(key);
+        } else {
+            java.util.Set<String> copy = ConcurrentHashMap.newKeySet();
+            copy.addAll(namespaces);
+            RECIPE_NAMESPACES.put(key, copy);
+        }
     }
 
     public static Map<String, Group> groups() {
@@ -279,6 +435,32 @@ public final class DimensionRules {
             groups.add(name, json);
         });
         out.add("groups", groups);
+        JsonObject difficulty = new JsonObject();
+        DIFFICULTY.forEach((key, value) ->
+                difficulty.addProperty(key.identifier().toString(), value.getSerializedName()));
+        out.add("difficulty", difficulty);
+        JsonObject weather = new JsonObject();
+        WEATHER.forEach((key, data) -> {
+            JsonObject w = new JsonObject();
+            w.addProperty("clear", data.getClearWeatherTime());
+            w.addProperty("rain", data.getRainTime());
+            w.addProperty("thunder", data.getThunderTime());
+            w.addProperty("raining", data.isRaining());
+            w.addProperty("thundering", data.isThundering());
+            weather.add(key.identifier().toString(), w);
+        });
+        out.add("weather", weather);
+        JsonObject recipes = new JsonObject();
+        RECIPE_NAMESPACES.forEach((key, namespaces) -> {
+            var array = new com.google.gson.JsonArray();
+            namespaces.forEach(array::add);
+            recipes.add(key.identifier().toString(), array);
+        });
+        out.add("recipes", recipes);
+        JsonObject time = new JsonObject();
+        com.dimrule.TimeIsolation.offsets().forEach((key, ticks) ->
+                time.addProperty(key.identifier().toString(), ticks));
+        out.add("time", time);
         try {
             Files.createDirectories(configFile.getParent());
             try (Writer writer = Files.newBufferedWriter(configFile, StandardCharsets.UTF_8)) {
