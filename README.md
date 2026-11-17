@@ -1,0 +1,121 @@
+# Dimensional Rule Isolation / 维度规则隔离
+
+> **AI 参与声明**
+> 本项目的代码、文档与图标由 **AI 编码代理（DeepSeek Harness）** 生成；
+> **QiLin_Z** 提供需求与设计想法，并完成全部游戏内测试与验收。
+> 提交到 GitHub / Modrinth 时请保留此声明。
+
+让 **每个维度拥有独立的 `/gamerule`**（Minecraft 26.3，Fabric 服务端模组）。
+原版三界（主世界/下界/末地）和任何**数据包定义的维度**都各自一套规则，互不影响；
+还可以把维度放进**命名分组**，同一组的维度共享一套规则。
+
+服务端安装即可，原版客户端可直接进服（本模组不新增注册表内容、不发送自定义数据包）。
+
+## 为什么需要它
+
+26.3 把 gamerules 移到了服务器层：`ServerLevel.getGameRules()` 直接返回全服规则，
+所以 `/gamerule keep_inventory true` 会同时影响主世界、下界、末地。
+
+本模组在 `getGameRules()` 入口做一次重定向：每个维度（或每个分组）返回自己的 `GameRules` 实例。
+原版 `/gamerule` 命令本身就会读写 `source.getLevel().getGameRules()`，因此**不用改命令**，
+在哪个维度执行就改哪个维度。
+
+## 安装
+
+1. Fabric Loader ≥ 0.19.5，Fabric API（26.3 对应版本），Java 25
+2. 把 `dimension-rule-isolation-0.1.0.jar` 放进服务端 `mods/`
+3. 客户端不需要装
+
+## 命令
+
+| 命令 | 权限 | 作用 |
+|---|---|---|
+| `/dmr list` | 2 | 列出所有分组与未分组维度 |
+| `/dmr group list` | 3 | 只看分组 |
+| `/dmr group create <名字>` | 3 | 创建一个空分组（小写字母/数字/`_`/`-`） |
+| `/dmr group add <名字> <维度>` | 3 | 把维度加入分组（自动创建组；从旧组移出） |
+| `/dmr group remove <维度>` | 3 | 移出分组，并获得当前规则的独立副本 |
+| `/dmr group delete <名字>` | 3 | 删除分组，成员恢复独立（保留当前规则） |
+| `/dmr <维度> <规则> [值]` | 3 | 跨维度读写规则（控制台用） |
+| `/dmr reload` | 3 | 从磁盘重载规则与分组 |
+
+`/dimrule` 是 `/dmr` 的完整别名。
+
+示例：
+
+```text
+/dmr group create pvp
+/dmr group add pvp dimtest:room_a
+/dmr group add pvp dimtest:room_b
+/dmr group list
+/dmr group remove dimtest:room_b
+/dmr group delete pvp
+
+/gamerule keep_inventory true          # 在玩家所在维度（或所在分组）生效
+/dmr minecraft:the_nether keep_inventory true
+```
+
+## 分组语义
+
+- 每个维度默认独立；
+- 同一组的维度共享**同一个** `GameRules` 实例，组内任何维度改规则，全组同步；
+- 一个维度最多属于一个组，`add` 到新组会自动从旧组移出；
+- `remove` 时复制组当前值给该维度，之后互不影响；
+- `delete` 后成员各自独立，保留删除时的规则值；
+- 分组与规则一起持久化，重启后保留。
+
+## 持久化
+
+`<服务端>/config/dimensional-rule-isolation/dimension_rules.json`
+
+```json
+{
+  "dimensions": {
+    "minecraft:overworld": { "keep_inventory": "false", "...": "..." }
+  },
+  "groups": {
+    "pvp": {
+      "members": ["dimtest:room_a", "dimtest:room_b"],
+      "rules": { "keep_inventory": "true", "...": "..." }
+    }
+  }
+}
+```
+
+旧版纯 `维度 -> 规则` 映射、以及早期 `links` 数组仍可读取（自动迁移）。
+
+## 实测结果（2026-11-17，runServer + RCON，全新存档）
+
+- 6 个维度初始化：overworld / the_nether / the_end / dimtest:room_a / room_b / room_c；
+- 主世界 `mob_griefing=false` → 其它维度仍为 `true`（独立）；
+- `group create pvp` + `group add pvp room_a` + `group add pvp room_b` 后，在 room_a 改
+  `keep_inventory=true`，room_b 同步为 true，room_c 仍 false；
+- `group remove room_b` 后，room_a 改 false，room_b 保持 true（副本独立）；
+- `group delete pvp` 后 `dmr list` 显示 `共 6 个维度 / 0 个组`；
+- 日志：`run-server2` 之后 **0 ERROR / 0 Exception**。
+
+## 已知限制
+
+- **`advance_time`（昼夜）不随维度**：26.3 的世界时钟由 `ServerClockManager` 读取
+  `server.getGlobalGameRules()`，属于全服时间，不在本模组接管范围。
+- 原版改规则时会向所有玩家广播该规则的新值（客户端预测用），不影响服务端各维度实际取值。
+- 与「MultiWorld Core」类模组同时安装会重复接管 `getGameRules()`，**不要同时装**。
+
+## 跨维度死亡（已修复）
+
+原版死亡与复活用了**两套不同的规则来源**：
+
+- `ServerPlayer.die()` 用**死亡维度**的规则决定是否掉落；
+- `ServerPlayer.restoreFrom()` 用**复活目标维度**的规则决定是否复制物品栏。
+
+单维度时两者相同，逐维度规则下就会出现：在 `keep_inventory=true` 的组里死亡、复活回
+`keep_inventory=false` 的主世界 → 既不掉落也不复制，物品直接消失。
+
+模组通过 `ServerPlayerRespawnMixin` 让复活复制**以死亡维度的规则为准**，与掉落判断一致。
+
+## 构建
+
+```bash
+./gradlew build
+# 产物: build/libs/dimension-rule-isolation-0.1.0.jar
+```
